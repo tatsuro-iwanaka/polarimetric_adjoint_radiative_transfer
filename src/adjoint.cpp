@@ -4,30 +4,36 @@
 #include <cmath>
 #include <algorithm>
 #include <numbers>
+#include <omp.h>
 
 namespace paad::core
 {
 
 namespace
 {
-	void applyDelta34(Eigen::MatrixXd& M, int n_stokes)
+
+void applyDelta34(Eigen::MatrixXd& M, int n_stokes)
+{
+	if (n_stokes < 3)
 	{
-		if (n_stokes < 3) return;
+		return;
+	}
 
-		for (int r = 0; r < M.rows(); ++r)
+	for (int r = 0; r < M.rows(); ++r)
+	{
+		for (int c = 0; c < M.cols(); ++c)
 		{
-			for (int c = 0; c < M.cols(); ++c)
-			{
-				bool r_neg = ((r % n_stokes) == 2 || (r % n_stokes) == 3);
-				bool c_neg = ((c % n_stokes) == 2 || (c % n_stokes) == 3);
+			bool r_neg = ((r % n_stokes) == 2 || (r % n_stokes) == 3);
+			bool c_neg = ((c % n_stokes) == 2 || (c % n_stokes) == 3);
 
-				if (r_neg != c_neg)
-				{
-					M(r, c) = -M(r, c);
-				}
+			if (r_neg != c_neg)
+			{
+				M(r, c) = -M(r, c);
 			}
 		}
 	}
+}
+
 }
 
 template <typename T>
@@ -56,7 +62,7 @@ void accumulate_gradient_to_grid(double theta_val, const T& grad_val, const std:
 	grad_P_array[idx] += grad_val * w_next;
 }
 
-RadiativeLayer doubleLayer_adjoint(const RadiativeLayer& layer, const geometry::Geometry& geometry, const RadiativeLayer& adj_result)
+RadiativeLayer doubleLayer_adjoint(const RadiativeLayer& layer, const geometry::Geometry& geometry, const RadiativeLayer& adj_result, int n_parallel_fourier)
 {
 	RadiativeLayer adj_layer = layer;
 	adj_layer.optical_thickness = 0.0;
@@ -87,6 +93,7 @@ RadiativeLayer doubleLayer_adjoint(const RadiativeLayer& layer, const geometry::
 
 	adj_layer.optical_thickness += adj_result.optical_thickness * 2.0;
 
+	#pragma omp parallel for num_threads(n_parallel_fourier)
 	for(int m = 0; m <= geometry.M; m++)
 	{
 		double factor = 2.0;
@@ -100,15 +107,6 @@ RadiativeLayer doubleLayer_adjoint(const RadiativeLayer& layer, const geometry::
 		Eigen::MatrixXd D = factor * S * W * layer.transmittance_m_top[m] + layer.transmittance_m_top[m] + Sexp;
 		Eigen::MatrixXd U = factor * layer.reflectance_m_top[m] * W * D + layer.reflectance_m_top[m] * E;
 
-		Eigen::VectorXd vec_V, vec_D, vec_U;
-
-		if(m == 0)
-		{
-			vec_V = layer.source_down + factor * layer.reflectance_m_bottom[m] * W * layer.source_up;
-			vec_D = lu.solve(vec_V);
-			vec_U = layer.source_up + factor * layer.reflectance_m_top[m] * W * vec_D;
-		}
-
 		Eigen::MatrixXd adj_R_bot = adj_result.reflectance_m_bottom[m];
 		Eigen::MatrixXd adj_T_bot = adj_result.transmittance_m_bottom[m];
 		
@@ -121,65 +119,91 @@ RadiativeLayer doubleLayer_adjoint(const RadiativeLayer& layer, const geometry::
 		Eigen::MatrixXd adj_ref_top = adj_result.reflectance_m_top[m] + adj_R_bot;
 		Eigen::MatrixXd adj_trans_top = adj_result.transmittance_m_top[m] + adj_T_bot;
 		Eigen::MatrixXd adj_S = Eigen::MatrixXd::Zero(dim, dim);
-		Eigen::MatrixXd adj_Q2_therm = Eigen::MatrixXd::Zero(dim, dim);
-
-		if(m == 0)
-		{
-			Eigen::VectorXd adj_J_new = adj_result.source_up + adj_result.source_down;
-			adj_layer.source_up += adj_J_new;
-
-			Eigen::VectorXd adj_U_vec = (factor * layer.transmittance_m_bottom[m] * W + E).transpose() * adj_J_new;
-			adj_layer.transmittance_m_bottom[m] += factor * adj_J_new * (W * vec_U).transpose();
-			adj_exp_tau_diag += adj_J_new.cwiseProduct(vec_U);
-
-			adj_layer.source_up += adj_U_vec;
-			Eigen::VectorXd adj_D_vec = factor * W.transpose() * layer.reflectance_m_top[m].transpose() * adj_U_vec;
-			adj_layer.reflectance_m_top[m] += factor * adj_U_vec * (W * vec_D).transpose();
-
-			Eigen::VectorXd adj_V = lu.transpose().solve(adj_D_vec);
-			adj_Q2_therm += adj_V * vec_D.transpose();
-
-			adj_layer.source_down += adj_V;
-			adj_layer.source_up += factor * W.transpose() * layer.reflectance_m_bottom[m].transpose() * adj_V;
-			adj_layer.reflectance_m_bottom[m] += factor * adj_V * (W * layer.source_up).transpose();
-		}
 
 		Eigen::MatrixXd adj_T_res = adj_trans_top;
 		adj_layer.transmittance_m_top[m] += adj_T_res * E.transpose();
+		
+		#pragma omp critical
 		adj_exp_tau_diag += (layer.transmittance_m_top[m].transpose() * adj_T_res).diagonal();
 		
 		Eigen::MatrixXd adj_D = E.transpose() * adj_T_res;
+		
+		#pragma omp critical
 		adj_exp_tau_diag += (adj_T_res * D.transpose()).diagonal();
+		
 		adj_layer.transmittance_m_top[m] += factor * adj_T_res * (W * D).transpose();
 		adj_D += factor * (layer.transmittance_m_top[m] * W).transpose() * adj_T_res;
 
 		Eigen::MatrixXd adj_R_res = adj_ref_top;
 		adj_layer.reflectance_m_top[m] += adj_R_res;
 		Eigen::MatrixXd adj_U = E.transpose() * adj_R_res;
+		
+		#pragma omp critical
 		adj_exp_tau_diag += (adj_R_res * U.transpose()).diagonal();
+		
 		adj_layer.transmittance_m_bottom[m] += factor * adj_R_res * (W * U).transpose();
 		adj_U += factor * (layer.transmittance_m_bottom[m] * W).transpose() * adj_R_res;
 
 		adj_layer.reflectance_m_top[m] += factor * adj_U * (W * D).transpose();
 		adj_D += factor * (layer.reflectance_m_top[m] * W).transpose() * adj_U;
 		adj_layer.reflectance_m_top[m] += adj_U * E.transpose();
+		
+		#pragma omp critical
 		adj_exp_tau_diag += (layer.reflectance_m_top[m].transpose() * adj_U).diagonal();
 
 		adj_layer.transmittance_m_top[m] += adj_D;
 		adj_S += adj_D * E.transpose();
+		
+		#pragma omp critical
 		adj_exp_tau_diag += (S.transpose() * adj_D).diagonal();
+		
 		adj_S += factor * adj_D * (W * layer.transmittance_m_top[m]).transpose();
 		adj_layer.transmittance_m_top[m] += factor * (S * W).transpose() * adj_D;
 
 		Eigen::MatrixXd adj_Q1_base = lu.transpose().solve(adj_S);
 		Eigen::MatrixXd adj_Q2 = adj_Q1_base * S.transpose();
-		Eigen::MatrixXd adj_Q1 = adj_Q1_base;
-		
-		adj_Q2 += adj_Q2_therm;
-		adj_Q1 += factor * adj_Q2 * W.transpose();
+		Eigen::MatrixXd adj_Q1 = adj_Q1_base + factor * adj_Q2 * W.transpose();
 
 		adj_layer.reflectance_m_bottom[m] += factor * adj_Q1 * (W * layer.reflectance_m_top[m]).transpose();
 		adj_layer.reflectance_m_top[m] += factor * (layer.reflectance_m_bottom[m] * W).transpose() * adj_Q1;
+	}
+
+	if (geometry.M >= 0)
+	{
+		int m = 0;
+		double factor = 2.0;
+
+		Eigen::MatrixXd Q1 = factor * layer.reflectance_m_bottom[m] * W * layer.reflectance_m_top[m];
+		Eigen::MatrixXd Q2 = factor * Q1 * W;
+		Eigen::MatrixXd I_mat = Eigen::MatrixXd::Identity(dim, dim);
+		Eigen::PartialPivLU<Eigen::MatrixXd> lu(I_mat - Q2);
+
+		Eigen::VectorXd vec_V = layer.source_down + factor * layer.reflectance_m_bottom[m] * W * layer.source_up;
+		Eigen::VectorXd vec_D = lu.solve(vec_V);
+		Eigen::VectorXd vec_U = layer.source_up + factor * layer.reflectance_m_top[m] * W * vec_D;
+
+		Eigen::VectorXd adj_J_new = adj_result.source_up + adj_result.source_down;
+		adj_layer.source_up += adj_J_new;
+
+		Eigen::VectorXd adj_U_vec = (factor * layer.transmittance_m_bottom[m] * W + E).transpose() * adj_J_new;
+		adj_layer.transmittance_m_bottom[m] += factor * adj_J_new * (W * vec_U).transpose();
+		
+		adj_exp_tau_diag += adj_J_new.cwiseProduct(vec_U);
+
+		adj_layer.source_up += adj_U_vec;
+		Eigen::VectorXd adj_D_vec = factor * W.transpose() * layer.reflectance_m_top[m].transpose() * adj_U_vec;
+		adj_layer.reflectance_m_top[m] += factor * adj_U_vec * (W * vec_D).transpose();
+
+		Eigen::VectorXd adj_V = lu.transpose().solve(adj_D_vec);
+		Eigen::MatrixXd adj_Q2_therm = adj_V * vec_D.transpose();
+
+		adj_layer.source_down += adj_V;
+		adj_layer.source_up += factor * W.transpose() * layer.reflectance_m_bottom[m].transpose() * adj_V;
+		adj_layer.reflectance_m_bottom[m] += factor * adj_V * (W * layer.source_up).transpose();
+
+		Eigen::MatrixXd adj_Q1_therm = factor * adj_Q2_therm * W.transpose();
+		adj_layer.reflectance_m_bottom[m] += factor * adj_Q1_therm * (W * layer.reflectance_m_top[m]).transpose();
+		adj_layer.reflectance_m_top[m] += factor * (layer.reflectance_m_bottom[m] * W).transpose() * adj_Q1_therm;
 	}
 
 	for(int i = 0; i < geometry.Ntheta; i++)
@@ -191,7 +215,7 @@ RadiativeLayer doubleLayer_adjoint(const RadiativeLayer& layer, const geometry::
 	return adj_layer;
 }
 
-std::vector<RadiativeLayer> addLayer_adjoint(const RadiativeLayer& layer_bottom, const RadiativeLayer& layer_top, const geometry::Geometry& geometry, const RadiativeLayer& adj_result)
+std::vector<RadiativeLayer> addLayer_adjoint(const RadiativeLayer& layer_bottom, const RadiativeLayer& layer_top, const geometry::Geometry& geometry, const RadiativeLayer& adj_result, int n_parallel_fourier)
 {
 	RadiativeLayer adj_bot = layer_bottom;
 	RadiativeLayer adj_top = layer_top;
@@ -235,6 +259,7 @@ std::vector<RadiativeLayer> addLayer_adjoint(const RadiativeLayer& layer_bottom,
 	adj_bot.optical_thickness += adj_result.optical_thickness;
 	adj_top.optical_thickness += adj_result.optical_thickness;
 
+	#pragma omp parallel for num_threads(n_parallel_fourier)
 	for(int m = 0; m <= geometry.M; m++)
 	{
 		double factor = 2.0;
@@ -247,67 +272,45 @@ std::vector<RadiativeLayer> addLayer_adjoint(const RadiativeLayer& layer_bottom,
 		Eigen::MatrixXd D = factor * S * W * layer_top.transmittance_m_top[m] + layer_top.transmittance_m_top[m] + Sexp_t;
 		Eigen::MatrixXd U = factor * layer_bottom.reflectance_m_top[m] * W * D + layer_bottom.reflectance_m_top[m] * E_top;
 
-		Eigen::VectorXd vec_V, vec_D, vec_U;
-
-		if(m == 0)
-		{
-			vec_V = layer_top.source_down + factor * layer_top.reflectance_m_bottom[m] * W * layer_bottom.source_up;
-			vec_D = lu.solve(vec_V);
-			vec_U = layer_bottom.source_up + factor * layer_bottom.reflectance_m_top[m] * W * vec_D;
-		}
-
 		Eigen::MatrixXd adj_S = Eigen::MatrixXd::Zero(dim, dim);
-		Eigen::MatrixXd adj_Q1_therm = Eigen::MatrixXd::Zero(dim, dim);
-
-		if(m == 0)
-		{
-			Eigen::VectorXd adj_J1_new_up = adj_result.source_up;
-			Eigen::VectorXd adj_J2_new_dn = adj_result.source_down;
-
-			adj_bot.source_down += adj_J2_new_dn;
-			Eigen::VectorXd adj_D_vec = (factor * layer_bottom.transmittance_m_top[m] * W + E_bottom).transpose() * adj_J2_new_dn;
-			adj_bot.transmittance_m_top[m] += factor * adj_J2_new_dn * (W * vec_D).transpose();
-			adj_exp_tau_bot_diag += adj_J2_new_dn.cwiseProduct(vec_D);
-
-			adj_top.source_up += adj_J1_new_up;
-			Eigen::VectorXd adj_U_vec = (factor * layer_top.transmittance_m_bottom[m] * W + E_top).transpose() * adj_J1_new_up;
-			adj_top.transmittance_m_bottom[m] += factor * adj_J1_new_up * (W * vec_U).transpose();
-			adj_exp_tau_top_diag += adj_J1_new_up.cwiseProduct(vec_U);
-
-			adj_bot.source_up += adj_U_vec;
-			adj_D_vec += factor * W.transpose() * layer_bottom.reflectance_m_top[m].transpose() * adj_U_vec;
-			adj_bot.reflectance_m_top[m] += factor * adj_U_vec * (W * vec_D).transpose();
-
-			Eigen::VectorXd adj_V = lu.transpose().solve(adj_D_vec);
-			adj_Q1_therm += factor * adj_V * (W * vec_D).transpose();
-
-			adj_top.source_down += adj_V;
-			adj_bot.source_up += factor * W.transpose() * layer_top.reflectance_m_bottom[m].transpose() * adj_V;
-			adj_top.reflectance_m_bottom[m] += factor * adj_V * (W * layer_bottom.source_up).transpose();
-		}
 
 		Eigen::MatrixXd adj_T_res = adj_result.transmittance_m_top[m];
+		
+		#pragma omp critical
 		adj_exp_tau_bot_diag += (adj_T_res * D.transpose()).diagonal();
+		
 		Eigen::MatrixXd adj_D = E_bottom.transpose() * adj_T_res;
 		adj_bot.transmittance_m_top[m] += adj_T_res * E_top.transpose();
+		
+		#pragma omp critical
 		adj_exp_tau_top_diag += (layer_bottom.transmittance_m_top[m].transpose() * adj_T_res).diagonal();
+		
 		adj_bot.transmittance_m_top[m] += factor * adj_T_res * (W * D).transpose();
 		adj_D += factor * (layer_bottom.transmittance_m_top[m] * W).transpose() * adj_T_res;
 
 		Eigen::MatrixXd adj_R_res = adj_result.reflectance_m_top[m];
+		
+		#pragma omp critical
 		adj_exp_tau_top_diag += (adj_R_res * U.transpose()).diagonal();
+		
 		Eigen::MatrixXd adj_U = E_top.transpose() * adj_R_res;
 		adj_top.reflectance_m_top[m] += adj_R_res;
 		adj_top.transmittance_m_bottom[m] += factor * adj_R_res * (W * U).transpose();
 		adj_U += factor * (layer_top.transmittance_m_bottom[m] * W).transpose() * adj_R_res;
 
 		adj_bot.reflectance_m_top[m] += adj_U * E_top.transpose();
+		
+		#pragma omp critical
 		adj_exp_tau_top_diag += (layer_bottom.reflectance_m_top[m].transpose() * adj_U).diagonal();
+		
 		adj_bot.reflectance_m_top[m] += factor * adj_U * (W * D).transpose();
 		adj_D += factor * (layer_bottom.reflectance_m_top[m] * W).transpose() * adj_U;
 
 		adj_S += adj_D * E_top.transpose();
+		
+		#pragma omp critical
 		adj_exp_tau_top_diag += (S.transpose() * adj_D).diagonal();
+		
 		adj_top.transmittance_m_top[m] += adj_D;
 		adj_S += factor * adj_D * (W * layer_top.transmittance_m_top[m]).transpose();
 		adj_top.transmittance_m_top[m] += factor * (S * W).transpose() * adj_D;
@@ -315,11 +318,52 @@ std::vector<RadiativeLayer> addLayer_adjoint(const RadiativeLayer& layer_bottom,
 		Eigen::MatrixXd adj_Q1_base = lu.transpose().solve(adj_S);
 		Eigen::MatrixXd adj_Q2 = adj_Q1_base * S.transpose();
 		Eigen::MatrixXd adj_Q1 = adj_Q1_base + factor * adj_Q2 * W.transpose();
-		
-		adj_Q1 += adj_Q1_therm;
 
 		adj_top.reflectance_m_bottom[m] += factor * adj_Q1 * (W * layer_bottom.reflectance_m_top[m]).transpose();
 		adj_bot.reflectance_m_top[m] += factor * (layer_top.reflectance_m_bottom[m] * W).transpose() * adj_Q1;
+	}
+
+	if (geometry.M >= 0)
+	{
+		int m = 0;
+		double factor = 2.0;
+		Eigen::MatrixXd I_mat = Eigen::MatrixXd::Identity(dim, dim);
+
+		Eigen::MatrixXd Q1 = factor * layer_top.reflectance_m_bottom[m] * W * layer_bottom.reflectance_m_top[m];
+		Eigen::PartialPivLU<Eigen::MatrixXd> lu(I_mat - factor * Q1 * W);
+
+		Eigen::VectorXd vec_V = layer_top.source_down + factor * layer_top.reflectance_m_bottom[m] * W * layer_bottom.source_up;
+		Eigen::VectorXd vec_D = lu.solve(vec_V);
+		Eigen::VectorXd vec_U = layer_bottom.source_up + factor * layer_bottom.reflectance_m_top[m] * W * vec_D;
+
+		Eigen::VectorXd adj_J1_new_up = adj_result.source_up;
+		Eigen::VectorXd adj_J2_new_dn = adj_result.source_down;
+
+		adj_bot.source_down += adj_J2_new_dn;
+		Eigen::VectorXd adj_D_vec = (factor * layer_bottom.transmittance_m_top[m] * W + E_bottom).transpose() * adj_J2_new_dn;
+		adj_bot.transmittance_m_top[m] += factor * adj_J2_new_dn * (W * vec_D).transpose();
+		
+		adj_exp_tau_bot_diag += adj_J2_new_dn.cwiseProduct(vec_D);
+
+		adj_top.source_up += adj_J1_new_up;
+		Eigen::VectorXd adj_U_vec = (factor * layer_top.transmittance_m_bottom[m] * W + E_top).transpose() * adj_J1_new_up;
+		adj_top.transmittance_m_bottom[m] += factor * adj_J1_new_up * (W * vec_U).transpose();
+		
+		adj_exp_tau_top_diag += adj_J1_new_up.cwiseProduct(vec_U);
+
+		adj_bot.source_up += adj_U_vec;
+		adj_D_vec += factor * W.transpose() * layer_bottom.reflectance_m_top[m].transpose() * adj_U_vec;
+		adj_bot.reflectance_m_top[m] += factor * adj_U_vec * (W * vec_D).transpose();
+
+		Eigen::VectorXd adj_V = lu.transpose().solve(adj_D_vec);
+		Eigen::MatrixXd adj_Q1_therm = factor * adj_V * (W * vec_D).transpose();
+
+		adj_top.source_down += adj_V;
+		adj_bot.source_up += factor * W.transpose() * layer_top.reflectance_m_bottom[m].transpose() * adj_V;
+		adj_top.reflectance_m_bottom[m] += factor * adj_V * (W * layer_bottom.source_up).transpose();
+
+		adj_top.reflectance_m_bottom[m] += factor * adj_Q1_therm * (W * layer_bottom.reflectance_m_top[m]).transpose();
+		adj_bot.reflectance_m_top[m] += factor * (layer_top.reflectance_m_bottom[m] * W).transpose() * adj_Q1_therm;
 	}
 
 	for(int i = 0; i < geometry.Ntheta; i++)
@@ -522,4 +566,129 @@ OpticalSensitivity computeInitializationSensitivities(const RadiativeLayer& adj_
 	return result;
 }
 
-} // namespace paad::core
+InternalRadianceAdjointResult computeInternalRadianceVector_adjoint(const RadiativeLayer& layer_top, const RadiativeLayer& layer_bottom, const Eigen::VectorXd& I_minus_k, const Eigen::VectorXd& I_minus_k_1, const Eigen::VectorXd& adj_I_plus_k_1, const Eigen::VectorXd& adj_I_minus_k_1, const geometry::Geometry& geo, int n_stokes)
+{
+	InternalRadianceAdjointResult res;
+	res.adj_layer_top = layer_top;
+	res.adj_layer_bottom = layer_bottom;
+
+	res.adj_layer_top.optical_thickness = 0.0;
+	res.adj_layer_bottom.optical_thickness = 0.0;
+	res.adj_layer_top.source_up.setZero(); res.adj_layer_top.source_down.setZero();
+	res.adj_layer_bottom.source_up.setZero(); res.adj_layer_bottom.source_down.setZero();
+
+	for(size_t m = 0; m < layer_top.reflectance_m_top.size(); ++m)
+	{
+		res.adj_layer_top.reflectance_m_top[m].setZero();
+		res.adj_layer_top.reflectance_m_bottom[m].setZero();
+		res.adj_layer_top.transmittance_m_top[m].setZero();
+		res.adj_layer_top.transmittance_m_bottom[m].setZero();
+		
+		res.adj_layer_bottom.reflectance_m_top[m].setZero();
+		res.adj_layer_bottom.reflectance_m_bottom[m].setZero();
+		res.adj_layer_bottom.transmittance_m_top[m].setZero();
+		res.adj_layer_bottom.transmittance_m_bottom[m].setZero();
+	}
+	
+	int dim = layer_top.reflectance_m_top[0].rows();
+	Eigen::VectorXd exp_tau = Eigen::VectorXd::Zero(geo.Ntheta);
+	for(int i = 0; i < geo.Ntheta; ++i) exp_tau(i) = std::exp(-layer_top.optical_thickness / geo.mu(i));
+	
+	Eigen::MatrixXd E_k = expandDiagonal(exp_tau, n_stokes);
+	Eigen::MatrixXd W = expandWMU(geo.WMU, n_stokes);
+	
+	double factor = 2.0;
+
+	Eigen::MatrixXd Q1 = factor * layer_top.reflectance_m_bottom[0] * W * layer_bottom.reflectance_m_top[0];
+	Eigen::MatrixXd I_mat = Eigen::MatrixXd::Identity(dim, dim);
+	Eigen::PartialPivLU<Eigen::MatrixXd> lu(I_mat - factor * Q1 * W);
+
+	res.adj_layer_bottom.source_up += adj_I_plus_k_1;
+	res.adj_layer_bottom.reflectance_m_top[0] += factor * adj_I_plus_k_1 * (W * I_minus_k_1).transpose();
+	Eigen::VectorXd cur_adj_I_minus_k_1 = adj_I_minus_k_1 + factor * W.transpose() * layer_bottom.reflectance_m_top[0].transpose() * adj_I_plus_k_1;
+
+	Eigen::VectorXd adj_src = lu.transpose().solve(cur_adj_I_minus_k_1);
+	Eigen::MatrixXd adj_Q1 = factor * adj_src * (W * I_minus_k_1).transpose();
+
+	res.adj_layer_top.reflectance_m_bottom[0] += factor * adj_Q1 * (W * layer_bottom.reflectance_m_top[0]).transpose();
+	res.adj_layer_bottom.reflectance_m_top[0] += factor * (layer_top.reflectance_m_bottom[0] * W).transpose() * adj_Q1;
+
+	res.adj_layer_top.transmittance_m_top[0] += factor * adj_src * (W * I_minus_k).transpose();
+	res.adj_I_minus_k_vec = (factor * layer_top.transmittance_m_top[0] * W + E_k).transpose() * adj_src; 
+	
+	res.adj_layer_top.source_down += adj_src;
+	res.adj_layer_bottom.source_up += factor * W.transpose() * layer_top.reflectance_m_bottom[0].transpose() * adj_src;
+	res.adj_layer_top.reflectance_m_bottom[0] += factor * adj_src * (W * layer_bottom.source_up).transpose();
+
+	Eigen::VectorXd adj_E_k_diag = adj_src.cwiseProduct(I_minus_k);
+
+	for (int i = 0; i < geo.Ntheta; ++i)
+	{
+		double sum_adj = adj_E_k_diag.segment(n_stokes * i, n_stokes).sum();
+		res.adj_layer_top.optical_thickness += sum_adj * (-1.0 / geo.mu(i)) * exp_tau(i);
+	}
+
+	return res;
+}
+
+InternalRadianceAdjointResult computeInternalRadianceMatrix_adjoint(const RadiativeLayer& layer_top, const RadiativeLayer& layer_bottom, const Eigen::MatrixXd& I_minus_k, const Eigen::MatrixXd& I_minus_k_1, const Eigen::MatrixXd& adj_I_plus_k_1, const Eigen::MatrixXd& adj_I_minus_k_1, const geometry::Geometry& geo, int m, int n_stokes)
+{
+	InternalRadianceAdjointResult res;
+	res.adj_layer_top = layer_top;
+	res.adj_layer_bottom = layer_bottom;
+
+	res.adj_layer_top.optical_thickness = 0.0;
+	res.adj_layer_bottom.optical_thickness = 0.0;
+	res.adj_layer_top.source_up.setZero(); res.adj_layer_top.source_down.setZero();
+	res.adj_layer_bottom.source_up.setZero(); res.adj_layer_bottom.source_down.setZero();
+
+	for(size_t i = 0; i < layer_top.reflectance_m_top.size(); ++i)
+	{
+		res.adj_layer_top.reflectance_m_top[i].setZero();
+		res.adj_layer_top.reflectance_m_bottom[i].setZero();
+		res.adj_layer_top.transmittance_m_top[i].setZero();
+		res.adj_layer_top.transmittance_m_bottom[i].setZero();
+		
+		res.adj_layer_bottom.reflectance_m_top[i].setZero();
+		res.adj_layer_bottom.reflectance_m_bottom[i].setZero();
+		res.adj_layer_bottom.transmittance_m_top[i].setZero();
+		res.adj_layer_bottom.transmittance_m_bottom[i].setZero();
+	}
+	
+	int dim = layer_top.reflectance_m_top[0].rows();
+	Eigen::VectorXd exp_tau = Eigen::VectorXd::Zero(geo.Ntheta);
+	for(int i = 0; i < geo.Ntheta; ++i) exp_tau(i) = std::exp(-layer_top.optical_thickness / geo.mu(i));
+	
+	Eigen::MatrixXd E_k = expandDiagonal(exp_tau, n_stokes);
+	Eigen::MatrixXd W = expandWMU(geo.WMU, n_stokes);
+
+	double factor = 2.0;
+
+	Eigen::MatrixXd Q1 = factor * layer_top.reflectance_m_bottom[m] * W * layer_bottom.reflectance_m_top[m];
+	Eigen::MatrixXd I_mat = Eigen::MatrixXd::Identity(dim, dim);
+	Eigen::PartialPivLU<Eigen::MatrixXd> lu(I_mat - factor * Q1 * W);
+
+	res.adj_layer_bottom.reflectance_m_top[m] += factor * adj_I_plus_k_1 * (W * I_minus_k_1).transpose();
+	Eigen::MatrixXd cur_adj_I_minus_k_1 = adj_I_minus_k_1 + factor * W.transpose() * layer_bottom.reflectance_m_top[m].transpose() * adj_I_plus_k_1;
+
+	Eigen::MatrixXd adj_src = lu.transpose().solve(cur_adj_I_minus_k_1);
+	Eigen::MatrixXd adj_Q1 = factor * adj_src * (W * I_minus_k_1).transpose();
+
+	res.adj_layer_top.reflectance_m_bottom[m] += factor * adj_Q1 * (W * layer_bottom.reflectance_m_top[m]).transpose();
+	res.adj_layer_bottom.reflectance_m_top[m] += factor * (layer_top.reflectance_m_bottom[m] * W).transpose() * adj_Q1;
+
+	res.adj_layer_top.transmittance_m_top[m] += factor * adj_src * (W * I_minus_k).transpose();
+	res.adj_I_minus_k_mat = (factor * layer_top.transmittance_m_top[m] * W + E_k).transpose() * adj_src; 
+
+	Eigen::VectorXd adj_E_k_diag = (adj_src.cwiseProduct(I_minus_k)).rowwise().sum();
+	
+	for (int i = 0; i < geo.Ntheta; ++i)
+	{
+		double sum_adj = adj_E_k_diag.segment(n_stokes * i, n_stokes).sum();
+		res.adj_layer_top.optical_thickness += sum_adj * (-1.0 / geo.mu(i)) * exp_tau(i);
+	}
+
+	return res;
+}
+
+}
