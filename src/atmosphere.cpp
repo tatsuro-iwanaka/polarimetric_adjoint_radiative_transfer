@@ -11,136 +11,140 @@ namespace paad::atmosphere
 
 void ArrheniusCrossSectionModel::loadVectors(const std::vector<double>& spectral, const std::vector<double>& temperature, const std::vector<std::vector<double>>& cross_section)
 {
-	spectral_ = spectral;
-	size_t num_specs = spectral_.size();
-	size_t num_temps = temperature.size();
+    spectral_ = spectral;
+    size_t num_specs = spectral_.size();
+    size_t num_temps = temperature.size();
 
-	slope_.resize(num_specs);
-	intercept_.resize(num_specs);
-	valid_flag_.resize(num_specs, false);
+    slope_.resize(num_specs);
+    intercept_.resize(num_specs);
+    valid_flag_.resize(num_specs, false);
 
-	for (size_t i = 0; i < num_specs; ++i)
-	{
-		double sum_x = 0.0, sum_y = 0.0, sum_xy = 0.0, sum_xx = 0.0;
-		int n = 0;
+    int valid_count = 0;
 
-		for (size_t j = 0; j < num_temps; ++j)
-		{
-			double val = cross_section[i][j];
+    for (size_t i = 0; i < num_specs; ++i)
+    {
+        double sum_x = 0.0, sum_y = 0.0, sum_xy = 0.0, sum_xx = 0.0;
+        int n = 0;
 
-			if (val > 0.0)
-			{ 
-				double x = 1.0 / temperature[j];
-				double y = std::log(val);
-				sum_x += x;
-				sum_y += y;
-				sum_xy += x * y;
-				sum_xx += x * x;
-				n++;
-			}
-		}
+        for (size_t j = 0; j < num_temps; ++j)
+        {
+            double val = cross_section[i][j];
 
-		if (n >= 2)
-		{
-			double denominator = static_cast<double>(n) * sum_xx - sum_x * sum_x;
+            if (val > 0.0 && temperature[j] > 0.0) // ゼロ除算回避を追加
+            { 
+                double x = 1.0 / temperature[j];
+                double y = std::log(val);
+                sum_x += x;
+                sum_y += y;
+                sum_xy += x * y;
+                sum_xx += x * x;
+                n++;
+            }
+        }
 
-			if (std::abs(denominator) > 0.0)
-			{
-				slope_[i] = (static_cast<double>(n) * sum_xy - sum_x * sum_y) / denominator;
-				intercept_[i] = (sum_xx * sum_y - sum_xy * sum_x) / denominator;
-				valid_flag_[i] = true;
-			}
-		} 
-		else if (n == 1)
-		{
-			slope_[i] = 0.0;
-			intercept_[i] = sum_y;
-			valid_flag_[i] = true;
-		}
-		else
-		{
-			slope_[i] = 0.0;
-			intercept_[i] = -1.0E300;
-			valid_flag_[i] = false;
-		}
-	}
+        if (n >= 2)
+        {
+            double denominator = static_cast<double>(n) * sum_xx - sum_x * sum_x;
+
+            if (std::abs(denominator) > 0.0)
+            {
+                slope_[i] = (static_cast<double>(n) * sum_xy - sum_x * sum_y) / denominator;
+                intercept_[i] = (sum_xx * sum_y - sum_xy * sum_x) / denominator;
+                valid_flag_[i] = true;
+                valid_count++;
+            }
+        } 
+        else if (n == 1)
+        {
+            slope_[i] = 0.0;
+            intercept_[i] = sum_y;
+            valid_flag_[i] = true;
+            valid_count++;
+        }
+        else
+        {
+            slope_[i] = 0.0;
+            intercept_[i] = -1.0E300;
+            valid_flag_[i] = false;
+        }
+    }
 }
 
 void ArrheniusCrossSectionModel::loadNetCDF(const NetCDFCrossSectionConfig& config)
 {
-	try
-	{
-		netCDF::NcFile dataFile(config.filename, netCDF::NcFile::read);
+    try
+    {
+        netCDF::NcFile dataFile(config.filename, netCDF::NcFile::read);
 
-		auto getVarSafe = [&](const std::string& name) -> netCDF::NcVar
-		{
-			netCDF::NcVar var = dataFile.getVar(name);
-			if(var.isNull()) throw std::runtime_error("NetCDF Variable '" + name + "' not found in " + config.filename);
-			return var;
-		};
+        auto getVarSafe = [&](const std::string& name) -> netCDF::NcVar
+        {
+            netCDF::NcVar var = dataFile.getVar(name);
+            if(var.isNull()) throw std::runtime_error("NetCDF Variable '" + name + "' not found in " + config.filename);
+            return var;
+        };
 
-		auto getScaleFromAttribute = [](const netCDF::NcVar& var) -> double
-		{
-			try
-			{
-				netCDF::NcVarAtt att = var.getAtt("units");
-				if (!att.isNull())
-				{
-					std::string unit_str;
-					att.getValues(unit_str);
-					return units::getUnitInfo(unit_str).to_si;
-				}
-			}
-			catch (...)
-			{
-				;
-			}
-			return 1.0;
-		};
+        auto getScaleFromAttribute = [](const netCDF::NcVar& var) -> double
+        {
+            try
+            {
+                netCDF::NcVarAtt att = var.getAtt("units");
+                if (!att.isNull())
+                {
+                    std::string unit_str;
+                    att.getValues(unit_str);
+                    return units::getUnitInfo(unit_str).to_si;
+                }
+            }
+            catch (...)
+            {
+                ;
+            }
+            return 1.0;
+        };
 
-		netCDF::NcVar v_spec = getVarSafe(config.var_name_spectral);
-		netCDF::NcVar v_temp = getVarSafe(config.var_name_temperature);
-		netCDF::NcVar v_cross_section = getVarSafe(config.var_name_cross_section);
+        netCDF::NcVar v_spec = getVarSafe(config.var_name_spectral);
+        netCDF::NcVar v_temp = getVarSafe(config.var_name_temperature);
+        netCDF::NcVar v_cross_section = getVarSafe(config.var_name_cross_section);
 
-		size_t num_spec = v_spec.getDim(0).getSize();
-		size_t num_temp = v_temp.getDim(0).getSize();
+        size_t num_spec = v_spec.getDim(0).getSize();
+        size_t num_temp = v_temp.getDim(0).getSize();
 
-		std::vector<double> buf_spec(num_spec);
-		std::vector<double> buf_temperature(num_temp);
-		std::vector<double> buf_cross_section(num_spec * num_temp);
+        std::vector<double> buf_spec(num_spec);
+        std::vector<double> buf_temperature(num_temp);
+        std::vector<double> buf_cross_section(num_spec * num_temp);
 
-		v_spec.getVar(buf_spec.data());
-		v_temp.getVar(buf_temperature.data());
-		v_cross_section.getVar(buf_cross_section.data());
+        v_spec.getVar(buf_spec.data());
+        v_temp.getVar(buf_temperature.data());
+        v_cross_section.getVar(buf_cross_section.data());
 
-		double scale_spec = getScaleFromAttribute(v_spec); 
-		double scale_temp = getScaleFromAttribute(v_temp);
-		double scale_cross_section = getScaleFromAttribute(v_cross_section);
+        double scale_spec = getScaleFromAttribute(v_spec); 
+        double scale_temp = getScaleFromAttribute(v_temp);
+        double scale_cross_section = getScaleFromAttribute(v_cross_section);
 
-		std::vector<double> spectral(num_spec);
-		std::vector<double> temperature(num_temp);
-		std::vector<std::vector<double>> cross_section(num_spec, std::vector<double>(num_temp));
+        std::vector<double> spectral(num_spec);
+        std::vector<double> temperature(num_temp);
+        std::vector<std::vector<double>> cross_section(num_spec, std::vector<double>(num_temp));
 
-		for(size_t i = 0; i < num_spec; ++i)
-		{
-			spectral[i] = buf_spec[i] * scale_spec;
+        for(size_t i = 0; i < num_spec; ++i)
+        {
+            spectral[i] = buf_spec[i] * scale_spec;
 
-			for(size_t j = 0; j < num_temp; ++j)
-			{
-				cross_section[i][j] = buf_cross_section[i * num_temp + j] * scale_cross_section;
-			}
-		}
-		for(size_t j = 0; j < num_temp; ++j)
-		{
-			temperature[j] = buf_temperature[j] * scale_temp;
-		}
+            for(size_t j = 0; j < num_temp; ++j)
+            {
+                cross_section[i][j] = buf_cross_section[i * num_temp + j] * scale_cross_section;
+            }
+        }
+        for(size_t j = 0; j < num_temp; ++j)
+        {
+            temperature[j] = buf_temperature[j] * scale_temp;
+        }
 
-		loadVectors(spectral, temperature, cross_section);
-	}
-	catch(const netCDF::exceptions::NcException& e)
-	{
-		throw std::runtime_error("NetCDF Error in " + config.filename + ": " + std::string(e.what()));
-	}
+        loadVectors(spectral, temperature, cross_section);
+    }
+    catch(const netCDF::exceptions::NcException& e)
+    {
+        throw std::runtime_error("NetCDF Error in " + config.filename + ": " + std::string(e.what()));
+    }
 }
 
 void ExternalScatteringModel::loadNetCDF(const NetCDFExternalScatteringConfig& config, PolarizationMode mode)
@@ -322,8 +326,6 @@ void compileHitranData(AtmosphereModel& atmos, const std::string& hitran_filepat
 			
 			hit_new.isotopologue_data.loadQTable(nc_hitran);
 			hit_new.cached_lines = hitran::loadLines(nc_hitran, hit_new.isotopologue_data, wavenumber_min, wavenumber_max, false);
-
-			// std::cout << "[HITRAN] " << s_new.name << " : " << hit_new.cached_lines.size() << " lines loaded.\n";
 
 			for (size_t k = 0; k < s_new.vertical_mixing_ratio_profile.size(); ++k)
 			{
