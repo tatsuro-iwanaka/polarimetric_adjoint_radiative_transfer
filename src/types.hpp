@@ -95,6 +95,14 @@ struct RadiativeTransferResult
 	int Ntheta;
 	int Nphi;
 	int Nmode;
+
+	std::vector<double> sfi_mu_0;
+	std::vector<double> sfi_mu_obs;
+	std::vector<double> sfi_dphi;
+
+	std::vector<double> sfi_reflectance; 
+	
+	std::vector<double> sfi_thermal_emission; 
 };
 
 struct InstrumentalFunction
@@ -150,6 +158,14 @@ struct Spectral
 	std::vector<double> calculation_grid;  
 };
 
+struct SFIGeometryConfig
+{
+	std::vector<double> solar_flux; 
+	std::vector<double> mu_0;
+	std::vector<double> mu_obs;
+	std::vector<double> dphi;
+};
+
 struct Simulation
 {
 	std::string simulation_name;
@@ -162,11 +178,15 @@ struct Simulation
 
 	double initial_optical_thickness = 1.0E-6;
 	int n_scattering_angle = 5;
-	int n_parallel = 1;
+	int n_parallel_spectral = 1;
+	int n_parallel_fourier = 1;
 	
 	PolarizationMode polarization_mode = PolarizationMode::FullStokes;
 
 	RunMode run_mode = RunMode::Forward;
+
+	bool use_sfi = false;
+	SFIGeometryConfig sfi_geometry;
 };
 
 }
