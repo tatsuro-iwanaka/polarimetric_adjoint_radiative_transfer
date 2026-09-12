@@ -12,24 +12,24 @@ find_package(netCDF REQUIRED)
 find_package(OpenMP REQUIRED)
 
 set(SOURCES
-    src/adjoint.cpp
-    src/atmosphere.cpp
-    src/configuration.cpp
-    src/forward.cpp
-    src/geometry.cpp
-    src/json.cpp
-    src/math.cpp
-    src/mie.cpp
-    src/physics.cpp
-    src/radiative_transfer.cpp
-    src/rayleigh.cpp
-    src/solver.cpp
-    src/inversion.cpp
-    src/string.cpp
-    src/units.cpp
-    src/vira.cpp
-    src/io.cpp
-    src/tools.cpp
+	src/adjoint.cpp
+	src/atmosphere.cpp
+	src/configuration.cpp
+	src/forward.cpp
+	src/geometry.cpp
+	src/json.cpp
+	src/math.cpp
+	src/mie.cpp
+	src/physics.cpp
+	src/radiative_transfer.cpp
+	src/rayleigh.cpp
+	src/solver.cpp
+	src/inversion.cpp
+	src/string.cpp
+	src/units.cpp
+	src/vira.cpp
+	src/io.cpp
+	src/tools.cpp
 	src/logger.cpp
 	src/sfi.cpp
 )
